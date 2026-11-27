@@ -618,7 +618,9 @@ table.hist tr:nth-child(even){background:#f9f9f9}
       <div class="fw" id="excel-title" style="font-size:13px">Прикачи RSC_Generator Excel</div>
       <div id="excel-subtitle" style="font-size:11px;color:#888">За автоматски сериски броеви и PLAN — RSC_Generator_v4.xlsx</div>
     </div>
-    <button class="btn-primary" id="excel-btn" onclick="pickExcel()">Прикачи .xlsx</button>
+    <div style="text-align:center"><button class="btn-primary" id="excel-btn" onclick="pickExcel()">Прикачи .xlsx</button>
+    <div><a href="#" onclick="pickExcelSimple();return false" style="font-size:10px;color:#888">обично прикачување</a></div></div>
+    <button class="btn-sec" id="reload-btn" onclick="reloadExcel()" title="Чита го Excel-от одново (на пр. после измени во PLAN)">🔄 Вчитај пак</button>
     <input type="file" id="excelFile" accept=".xlsx" style="display:none" onchange="handleExcel(this)"/>
   </div>
 </div>
@@ -779,6 +781,7 @@ function handleExcel(input){
   const reader = new FileReader();
   reader.onload = ev => {
     window._excelBytes = ev.target.result.slice(0);
+    if(!window._excelHandle) { const st = document.getElementById("excel-save-status"); if(st) st.textContent = ""; }
     // Save to localStorage for next time
     try {
       localStorage.setItem('rsc_excel_data', btoa(String.fromCharCode(...new Uint8Array(ev.target.result))));
@@ -854,6 +857,7 @@ function handleExcel(input){
     if(ids.length===0) addRSC(); else ids.forEach(()=>addRSC());
     if(typeof planPending === "function" && planPending().length) importPlan();
   };
+  reader.onerror = () => alert("Excel-от не може да се прочита (" + (reader.error ? reader.error.message : "") + "). Ако е отворен во Excel, затвори го и пробај пак.");
   reader.readAsArrayBuffer(file);
 }
 
@@ -1122,6 +1126,7 @@ function getRSCData(id){
     msc:g("msc"), dwg:(()=>{const el=document.getElementById("dwg-"+id); return el?(el.value==="manual"?"":el.value):"";})(), qcp:g("qcp"),
     _autoType:codeInscode, _autoPrefix:g("detcode"),
     _autoSeq:parseInt(g("seqcode"))||0,
+    _planSig:(()=>{const b=document.getElementById("rscblock-"+id); return b && b.dataset.planSig ? b.dataset.planSig : null;})(),
     _planRow:(()=>{const b=document.getElementById("rscblock-"+id); return b && b.dataset.planRow!==undefined && b.dataset.planRow!=="" ? parseInt(b.dataset.planRow) : null;})()
   };
 }
@@ -2585,6 +2590,7 @@ function parsePlanAoa(aoa){
       msc: String(get(row,"msc")||"").trim(),
       dwg: String(get(row,"dwg")||"").trim(),
       rscno: String(get(row,"rscno")||"").trim(),
+      _sig: planSig(k => get(row, k)),
     });
   }
 }
@@ -2686,6 +2692,7 @@ function importPlan(){
     addRSC();
     const id = rscCounter;
     document.getElementById("rscblock-"+id).dataset.planRow = p._row;
+    document.getElementById("rscblock-"+id).dataset.planSig = p._sig;
 
     const insEl = document.getElementById("inscode-"+id);
     if(p.type && INSPECTION_CODES[p.type]) insEl.value = p.type;
@@ -2729,13 +2736,21 @@ async function pickExcel(){
       const [h] = await window.showOpenFilePicker({types:[{description:"Excel", accept:{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":[".xlsx"]}}]});
       try { await h.requestPermission({mode:"readwrite"}); } catch(e) {}
       window._excelHandle = h;
+      idbSet("excelHandle", h);
       handleExcel({files:[await h.getFile()]});
       return;
-    } catch(e) { if(e && e.name === "AbortError") return; console.log("picker:", e); }
+    } catch(e) {
+      if(e && e.name === "AbortError") return;
+      console.log("picker:", e);
+      alert("Excel-от не може да се отвори за директно зачувување (" + (e && e.message ? e.message : e) + ").\n\n" +
+            "Најчесто е отворен во Excel — затвори го и пробај пак.\nИли кликни „обично прикачување“ под копчето.");
+      return;
+    }
   }
   window._excelHandle = null;
   document.getElementById("excelFile").click();
 }
+function pickExcelSimple(){ window._excelHandle = null; idbSet("excelHandle", null);document.getElementById("excelFile").click(); }
 
 const DONE_SHEET = "ГОТОВИ RSC";
 const DONE_COLS = ["Генериран","RSC број","Doc. Date","Локација (KM)","Тип","Inspection Detail","Inspection Code","Side","Element",
@@ -2770,7 +2785,7 @@ function insertTop(ws, hmap, vals){
 
 async function exportExcelKeepFormat(newRows, rscs, ts, opts){
   const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(window._excelBytes.slice(0));
+  await wb.xlsx.load(await latestExcelBytes());
   const headers = ws => { const m = {}; ws.getRow(1).eachCell({includeEmpty:false}, (c, i) => { m[String(cellText(c.value)).trim()] = i; }); return m; };
   const lastRowWith = (ws, col) => { let last = 1; for(let r = 2; r <= ws.rowCount; r++){ const v = cellText(ws.getRow(r).getCell(col).value); if(v !== "" && v !== null) last = r; } return last; };
   const styleHeader = row => row.eachCell(c => { c.font = {bold:true, color:{argb:"FFFFFFFF"}}; c.fill = {type:"pattern", pattern:"solid", fgColor:{argb:"FF1A3A5C"}}; c.alignment = {wrapText:true, vertical:"middle"}; });
@@ -2794,8 +2809,8 @@ async function exportExcelKeepFormat(newRows, rscs, ts, opts){
       for(let r = 2; r <= bro.rowCount; r++) if(String(cellText(bro.getRow(r).getCell(tcol).value)).trim() === type){ rowNo = r; break; }
       if(!rowNo){ rowNo = lastRowWith(bro, tcol) + 1; bro.getRow(rowNo).getCell(tcol).value = type; }
       const row = bro.getRow(rowNo);
-      const put = (name, val) => { if(bh[name]) row.getCell(bh[name]).value = val || 0; };
-      put("Последен Број", v.last); put("Последен Број IR", v.lastIR); put("Последен Број WS", v.lastWS); put("Последен Број SW", v.lastSW);
+      const put = (name, val) => { if(bh[name]){ const old = parseInt(cellText(row.getCell(bh[name]).value)) || 0; row.getCell(bh[name]).value = Math.max(old, val || 0); } };
+      put("Последен Број", v.last);put("Последен Број IR", v.lastIR); put("Последен Број WS", v.lastWS); put("Последен Број SW", v.lastSW);
       row.commit();
     });
   }
@@ -2830,7 +2845,10 @@ async function exportExcelKeepFormat(newRows, rscs, ts, opts){
   if(pl){
     const ph = headers(pl);
     const ncol = Math.max(...Object.values(ph), 1);
-    const doneRows = new Set(rscs.filter(r => r._planRow != null).map(r => r._planRow + 2));
+    const sigs = rscs.filter(r => r._planSig).map(r => r._planSig);
+    const doneRows = new Set();
+    const rowSig = r => planSig(k => { const c = ph[PLAN_COLS[k]]; return c ? cellText(pl.getRow(r).getCell(c).value) : ""; });
+    for(let r = 2; r <= pl.rowCount && sigs.length; r++){ const i = sigs.indexOf(rowSig(r)); if(i >= 0){ doneRows.add(r); sigs.splice(i, 1); } }
     const keep = [];
     for(let r = 2; r <= pl.rowCount; r++){
       const row = pl.getRow(r);
@@ -2927,7 +2945,7 @@ async function applyPendingTable(input){
 
     // 2. apply to the RSC Excel
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(window._excelBytes.slice(0));
+    await wb.xlsx.load(await latestExcelBytes());
     const found = new Set(); const cnt = {G:0, R:0, Y:0, skip:0};
     const apply = (ws, keyOf, dateOf) => {
       if(!ws) return;
@@ -2988,6 +3006,49 @@ async function saveExcelBuffer(buf){
   } catch(e) {}
   return where;
 }
+
+
+// ── Remember the Excel between visits (IndexedDB keeps the file handle) ──
+function idbOpen(){ return new Promise((res, rej) => { const q = indexedDB.open("rsc-generator", 1); q.onupgradeneeded = () => q.result.createObjectStore("kv"); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function idbSet(k, v){ try { const db = await idbOpen(); await new Promise((res, rej) => { const t = db.transaction("kv", "readwrite"); if(v === null) t.objectStore("kv").delete(k); else t.objectStore("kv").put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); }); } catch(e) { console.log("idbSet:", e); } }
+async function idbGet(k){ try { const db = await idbOpen(); return await new Promise((res, rej) => { const q = db.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); } catch(e) { return null; } }
+
+function planSig(get){
+  return ["loc","type","variant","extra","side","element","desc","docdate","estdate","esttime"].map(k => {
+    let v = get(k); if(v instanceof Date) v = v.toISOString().slice(0,10); return String(v == null ? "" : v).trim().toLowerCase();
+  }).join("|");
+}
+
+// newest bytes of the Excel: from the file itself when we have it, else our last copy
+async function latestExcelBytes(){
+  if(window._excelHandle){
+    try { const f = await window._excelHandle.getFile(); return await f.arrayBuffer(); }
+    catch(e) { console.log("read latest failed:", e); throw new Error("Excel-от не може да се прочита — ако е отворен во Excel, зачувај го и затвори го, па пробај пак"); }
+  }
+  return window._excelBytes.slice(0);
+}
+
+async function reloadExcel(){
+  const h = window._excelHandle || await idbGet("excelHandle");
+  if(!h){ pickExcel(); return; }
+  try {
+    if(h.queryPermission && (await h.queryPermission({mode:"readwrite"})) !== "granted") await h.requestPermission({mode:"readwrite"});
+    window._excelHandle = h;
+    handleExcel({files:[await h.getFile()]});
+    const rb = document.getElementById("reload-btn"); if(rb) rb.textContent = "🔄 Вчитај пак";
+  } catch(e) { alert("Excel-от не може да се вчита (" + e.message + "). Ако е отворен во Excel, затвори го и пробај пак."); }
+}
+
+// on start: if we know the file, read the newest version (or ask once with one click)
+(async () => {
+  const h = await idbGet("excelHandle");
+  if(!h || !h.queryPermission) return;
+  try {
+    if((await h.queryPermission({mode:"readwrite"})) === "granted"){ window._excelHandle = h; handleExcel({files:[await h.getFile()]}); return; }
+  } catch(e) { console.log(e); }
+  const rb = document.getElementById("reload-btn");
+  if(rb){ rb.textContent = "🔓 Отвори " + (h.name || "Excel"); rb.className = "btn-primary"; }
+})();
 
 // ── History ──
 function renderHistory(){
